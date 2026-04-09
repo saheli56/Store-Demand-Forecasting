@@ -23,6 +23,21 @@ from store_demand_forecasting import (
 st.set_page_config(page_title="Store Demand Forecasting", layout="wide")
 
 
+def build_input_key(data_source: str, local_path: str, uploaded_file) -> str:
+    uploaded_name = uploaded_file.name if uploaded_file is not None else ""
+    uploaded_size = getattr(uploaded_file, "size", "")
+    return f"{data_source}|{local_path}|{uploaded_name}|{uploaded_size}"
+
+
+def get_cached_results(input_key: str):
+    return st.session_state.get("run_results") if st.session_state.get("input_key") == input_key else None
+
+
+def cache_results(input_key: str, results: dict):
+    st.session_state["run_results"] = results
+    st.session_state["input_key"] = input_key
+
+
 def compute_shopkeeper_insights(df: pd.DataFrame) -> dict:
     summary = {}
     item_total = df.groupby("item_id")["sales"].sum().reset_index(name="total_sales")
@@ -89,7 +104,7 @@ def show_restock_table(restock_df: pd.DataFrame) -> None:
     st.markdown(styler.to_html(), unsafe_allow_html=True)
 
     # Allow the shopkeeper to select items to include in a reorder list
-    options = [f"{int(r['store_id'])}-{int(r['item_id'])}" for r in disp.to_dict(orient='records')]
+    options = [f"{r['store_id']}-{r['item_id']}" for r in disp.to_dict(orient='records')]
     selected = st.multiselect("Select items to include in reorder list (store-item)", options, default=options)
 
     if selected:
@@ -147,15 +162,15 @@ st.markdown(
 
 with st.sidebar:
     st.header("Data input")
-    data_source = st.radio("Choose data source", ["Upload CSV", "Local file path"])
+    data_source = st.radio("Choose data source", ["Upload CSV", "Local file path"], index=0, key="data_source")
     uploaded_file = None
-    local_path = None
+    local_path = "dummy_sales.csv"
     if data_source == "Upload CSV":
-        uploaded_file = st.file_uploader("Upload a sales CSV file", type="csv")
+        uploaded_file = st.file_uploader("Upload a sales CSV file", type="csv", key="uploaded_file")
     else:
-        local_path = st.text_input("Local CSV path", "dummy_sales.csv")
+        local_path = st.text_input("Local CSV path", "dummy_sales.csv", key="local_path")
 
-    forecast_days = st.slider("Forecast horizon", min_value=7, max_value=90, value=30, step=7)
+    forecast_days = st.slider("Forecast horizon", min_value=7, max_value=90, value=30, step=7, key="forecast_days")
 
 
 def load_sales_dataframe(uploaded_file, local_path):
@@ -317,13 +332,23 @@ def plot_actual_vs_predicted(df, model, feature_cols, store_id, item_id):
     st.pyplot(fig)
 
 
-if st.button("Run forecasting"):
+input_key = build_input_key(data_source, local_path, uploaded_file)
+if st.session_state.get("input_key") != input_key:
+    st.session_state["input_key"] = input_key
+    st.session_state["current_df"] = None
+    st.session_state["run_results"] = None
+
+if st.session_state.get("current_df") is None:
     try:
-        df = load_sales_dataframe(uploaded_file, local_path)
+        if data_source == "Upload CSV" and uploaded_file is not None:
+            st.session_state["current_df"] = load_sales_dataframe(uploaded_file, None)
+        elif data_source == "Local file path" and local_path:
+            st.session_state["current_df"] = load_sales_dataframe(None, local_path)
     except Exception as exc:
         st.error(f"Unable to load dataset: {exc}")
-        st.stop()
 
+if st.session_state.get("current_df") is not None:
+    df = st.session_state["current_df"]
     st.success("Dataset loaded successfully.")
     st.write("### Dataset sample")
     st.dataframe(df.head(10))
@@ -342,32 +367,32 @@ if st.button("Run forecasting"):
     filter_col1, filter_col2 = st.columns([2, 3])
     min_date, max_date = df['date'].min().date(), df['date'].max().date()
     with filter_col1:
-        date_range = st.date_input("Date range", [min_date, max_date])
+        date_range = st.date_input("Date range", [min_date, max_date], key="date_range")
         store_opts = ['All'] + sorted(df['store_id'].unique())
-        selected_store = st.selectbox("Store", store_opts, index=0)
+        selected_store = st.selectbox("Store", store_opts, index=0, key="filter_store")
     with filter_col2:
         st.markdown("Select the time window and store to focus the dashboard for easy action.")
 
-    # apply filters
+    filtered_df = df.copy()
     if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
         start_d, end_d = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
-        df = df[(df['date'] >= start_d) & (df['date'] <= end_d)]
+        filtered_df = filtered_df[(filtered_df['date'] >= start_d) & (filtered_df['date'] <= end_d)]
     if selected_store != 'All':
-        df = df[df['store_id'] == selected_store]
+        filtered_df = filtered_df[filtered_df['store_id'] == selected_store]
 
-    insights = compute_shopkeeper_insights(df)
+    insights = compute_shopkeeper_insights(filtered_df)
     st.write("## Quick Actions & KPIs")
     create_summary_metrics(insights)
 
     # Additional professional KPIs
-    total_sales = int(df['sales'].sum())
-    avg_daily = float(df.groupby('date')['sales'].sum().mean())
-    top_store = int(df.groupby('store_id')['sales'].sum().idxmax()) if not df.empty else None
+    total_sales = int(filtered_df['sales'].sum())
+    avg_daily = float(filtered_df.groupby('date')['sales'].sum().mean()) if not filtered_df.empty else 0.0
+    top_store = int(filtered_df.groupby('store_id')['sales'].sum().idxmax()) if not filtered_df.empty else None
     out_count = len(insights['out_of_stock'])
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Total Sales", f"{total_sales}")
     k2.metric("Avg Daily Sales", f"{avg_daily:.1f}")
-    k3.metric("Top Store", f"Store {top_store}")
+    k3.metric("Top Store", f"Store {top_store}" if top_store is not None else "N/A")
     k4.metric("Out-of-stock items", f"{out_count}")
 
     st.write("### Sales story")
@@ -380,74 +405,102 @@ if st.button("Run forecasting"):
         st.success("No likely out-of-stock items detected in the selected window.")
 
     st.write("### Top items — quick view")
-    show_top_item_cards(df, top_n=4)
+    show_top_item_cards(filtered_df, top_n=4)
 
     st.write("### Top-selling products (interactive)")
-    plot_interactive_top_sellers(df)
+    plot_interactive_top_sellers(filtered_df)
 
     st.write("### Slow-moving products (possible overstock risks)")
-    plot_interactive_slow_movers(df)
+    plot_interactive_slow_movers(filtered_df)
 
-    with st.spinner("Training models and generating forecasts..."):
-        df = train_baseline(df)
-        df_features, feature_cols = prepare_features(df)
-        X_train, X_valid, y_train, y_valid = split_data(df_features, feature_cols)
+    run = st.button("Run forecasting", key="run_forecasting")
+    results = get_cached_results(input_key)
+    if run:
+        with st.spinner("Training models and generating forecasts..."):
+            filtered_df = train_baseline(filtered_df)
+            df_features, feature_cols = prepare_features(filtered_df)
+            X_train, X_valid, y_train, y_valid = split_data(df_features, feature_cols)
 
-        if X_train.empty or len(y_train) < 2:
-            st.warning(
-                "Not enough structured time-series data to train a model. "
-                "Try a larger dataset or expand the selected date range."
-            )
-            forecast_df = pd.DataFrame(
-                {
-                    "date": [],
-                    "store_id": [],
-                    "item_id": [],
-                    "sales_forecast": [],
-                }
-            )
-            restock_df = suggest_restocking(df)
-            metrics_rf = metrics_lgb = {"rmse": None, "mae": None, "smape": None}
-            chosen_model = None
-        else:
-            rf_model = train_random_forest(X_train, y_train)
-            lgb_model = train_lightgbm(X_train, y_train, X_valid, y_valid)
+            if X_train.empty or len(y_train) < 2:
+                st.warning(
+                    "Not enough structured time-series data to train a model. "
+                    "Try a larger dataset or expand the selected date range."
+                )
+                forecast_df = pd.DataFrame(
+                    {
+                        "date": [],
+                        "store_id": [],
+                        "item_id": [],
+                        "sales_forecast": [],
+                    }
+                )
+                restock_df = suggest_restocking(filtered_df)
+                metrics_rf = metrics_lgb = {"rmse": None, "mae": None, "smape": None}
+                chosen_model = None
+            else:
+                rf_model = train_random_forest(X_train, y_train)
+                lgb_model = train_lightgbm(X_train, y_train, X_valid, y_valid)
 
-            y_pred_rf = rf_model.predict(X_valid) if not X_valid.empty else np.array([])
-            y_pred_lgb = lgb_model.predict(X_valid) if not X_valid.empty else np.array([])
-            metrics_rf = evaluate_forecasts(y_valid.values, y_pred_rf) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
-            metrics_lgb = evaluate_forecasts(y_valid.values, y_pred_lgb) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
-            chosen_model = lgb_model if metrics_lgb["rmse"] is not None and metrics_rf["rmse"] is not None and metrics_lgb["rmse"] <= metrics_rf["rmse"] else rf_model
-            forecast_df = forecast_next_days(df_features, chosen_model, feature_cols, forecast_days=forecast_days)
-            restock_df = suggest_restocking(df)
+                y_pred_rf = rf_model.predict(X_valid) if not X_valid.empty else np.array([])
+                y_pred_lgb = lgb_model.predict(X_valid) if not X_valid.empty else np.array([])
+                metrics_rf = evaluate_forecasts(y_valid.values, y_pred_rf) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
+                metrics_lgb = evaluate_forecasts(y_valid.values, y_pred_lgb) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
+                chosen_model = lgb_model if metrics_lgb["rmse"] is not None and metrics_rf["rmse"] is not None and metrics_lgb["rmse"] <= metrics_rf["rmse"] else rf_model
+                forecast_df = forecast_next_days(df_features, chosen_model, feature_cols, forecast_days=forecast_days)
+                restock_df = suggest_restocking(filtered_df)
 
-    st.write("## Model comparison")
-    comparison = pd.DataFrame([metrics_rf, metrics_lgb], index=["Random Forest", "LightGBM"])
-    st.dataframe(comparison)
-
-    st.write("## Forecast sample")
-    st.dataframe(forecast_df.head(20))
-    st.download_button(
-        label="Download forecast sample as CSV",
-        data=forecast_df.to_csv(index=False).encode("utf-8"),
-        file_name="sales_forecast.csv",
-        mime="text/csv",
-    )
-
-    st.write("## Restocking suggestions")
-    st.dataframe(restock_df.head(20))
-
-    st.write("## Explore store-item predictions")
-    stores = sorted(df["store_id"].unique())
-    items = sorted(df["item_id"].unique())
-    if stores and items and chosen_model is not None:
-        selected_store = st.selectbox("Choose store", stores)
-        selected_item = st.selectbox("Choose item", items)
-        plot_actual_vs_predicted(df_features, chosen_model, feature_cols, selected_store, selected_item)
-    elif stores and items:
-        st.info("Model training was skipped because the dataset is too small, so predictions are not available.")
+        results = {
+            "df_features": df_features,
+            "feature_cols": feature_cols,
+            "metrics_rf": metrics_rf,
+            "metrics_lgb": metrics_lgb,
+            "forecast_df": forecast_df,
+            "restock_df": restock_df,
+            "chosen_model": chosen_model,
+            "filtered_df": filtered_df,
+        }
+        cache_results(input_key, results)
+    elif results is not None:
+        df_features = results["df_features"]
+        feature_cols = results["feature_cols"]
+        metrics_rf = results["metrics_rf"]
+        metrics_lgb = results["metrics_lgb"]
+        forecast_df = results["forecast_df"]
+        restock_df = results["restock_df"]
+        chosen_model = results["chosen_model"]
+        filtered_df = results["filtered_df"]
     else:
-        st.warning("Dataset needs at least one store and one item to plot predictions.")
+        st.info("Click Run forecasting to train the model and generate predictions.")
+        results = None
+
+    if results is not None:
+        st.write("## Model comparison")
+        comparison = pd.DataFrame([metrics_rf, metrics_lgb], index=["Random Forest", "LightGBM"])
+        st.dataframe(comparison)
+
+        st.write("## Forecast sample")
+        st.dataframe(forecast_df.head(20))
+        st.download_button(
+            label="Download forecast sample as CSV",
+            data=forecast_df.to_csv(index=False).encode("utf-8"),
+            file_name="sales_forecast.csv",
+            mime="text/csv",
+        )
+
+        st.write("## Restocking suggestions")
+        st.dataframe(restock_df.head(20))
+
+        st.write("## Explore store-item predictions")
+        stores = sorted(filtered_df["store_id"].unique())
+        items = sorted(filtered_df["item_id"].unique())
+        if stores and items and chosen_model is not None:
+            selected_store = st.selectbox("Choose store", stores, key="explore_store")
+            selected_item = st.selectbox("Choose item", items, key="explore_item")
+            plot_actual_vs_predicted(df_features, chosen_model, feature_cols, selected_store, selected_item)
+        elif stores and items:
+            st.info("Model training was skipped because the dataset is too small, so predictions are not available.")
+        else:
+            st.warning("Dataset needs at least one store and one item to plot predictions.")
 
     st.write("### Notes")
     st.info(
