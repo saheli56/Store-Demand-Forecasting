@@ -2,6 +2,7 @@ import os
 from typing import List, Tuple
 
 import lightgbm as lgb
+import chardet
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -14,12 +15,85 @@ def load_sales_data(csv_path: str) -> pd.DataFrame:
     """Load historical sales data from a CSV file."""
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
+    # Try chardet to detect encoding, then fall back to common encodings
+    last_exc = None
+    try:
+        with open(csv_path, "rb") as fh:
+            raw = fh.read(100000)
+        det = chardet.detect(raw)
+        enc = det.get("encoding") or "utf-8"
+        df = pd.read_csv(csv_path, encoding=enc, sep=None, engine="python")
+    except Exception as e:
+        last_exc = e
+        encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252", "iso-8859-1"]
+        for enc_try in encodings:
+            try:
+                df = pd.read_csv(csv_path, encoding=enc_try, sep=None, engine="python")
+                break
+            except Exception as e2:
+                last_exc = e2
+        else:
+            raise last_exc
 
-    df = pd.read_csv(csv_path, parse_dates=["date"])
-    expected_cols = {"date", "store_id", "item_id", "sales"}
-    missing = expected_cols - set(df.columns)
+    # Normalize column names (accept alternative names)
+    cols = {c.lower(): c for c in df.columns}
+    mapping = {}
+    candidates = {
+        "date": ["date", "order_date", "orderdate", "ship_date", "shipped_date", "timestamp", "time", "day", "invoice_date", "created_at"],
+        "store_id": ["store_id", "store", "storeid", "shop_id", "customername", "customer_name", "territory", "country", "city", "ordernumber", "order_number"],
+        "item_id": ["item_id", "item", "product_id", "product", "sku", "productcode", "product_code", "productline", "product_line", "model"],
+        "sales": ["sales", "revenue", "amount", "total", "total_sales", "sale", "sales_amount"]
+    }
+    for std, cands in candidates.items():
+        for cand in cands:
+            if cand in cols:
+                mapping[cols[cand]] = std
+                break
+
+    df = df.rename(columns=mapping)
+
+    if "sales" not in df.columns:
+        qty_key = None
+        price_key = None
+        for cand in ["quantityordered", "quantity_ordered", "qty", "quantity", "units_sold"]:
+            if cand in cols:
+                qty_key = cols[cand]
+                break
+        for cand in ["priceeach", "price_each", "price", "unit_price", "amount"]:
+            if cand in cols:
+                price_key = cols[cand]
+                break
+        if qty_key and price_key:
+            df["sales"] = pd.to_numeric(df[qty_key], errors="coerce") * pd.to_numeric(df[price_key], errors="coerce")
+        elif qty_key:
+            df["sales"] = pd.to_numeric(df[qty_key], errors="coerce")
+
+    if "item_id" not in df.columns:
+        for cand in ["productcode", "product_code", "productline", "product_line", "item", "model"]:
+            if cand in cols:
+                df["item_id"] = df[cols[cand]]
+                break
+
+    if "store_id" not in df.columns:
+        if "ordernumber" in cols:
+            df["store_id"] = pd.to_numeric(df[cols["ordernumber"]], errors="coerce")
+        elif "customername" in cols:
+            df["store_id"] = df[cols["customername"]].astype(str).factorize()[0] + 1
+        else:
+            df["store_id"] = 1
+
+    required = {"date", "store_id", "item_id", "sales"}
+    missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+        raise ValueError(f"Missing required columns after normalization: {missing}")
+
+    # Parse and clean types
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
+    df["item_id"] = df["item_id"].astype(str).str.strip()
+    df["store_id"] = df["store_id"].astype(str).str.strip()
+    df["store_id"] = pd.factorize(df["store_id"])[0] + 1
+    df = df.dropna(subset=["date", "item_id", "sales"])  # remove unusable rows
 
     return df.sort_values(["store_id", "item_id", "date"]).reset_index(drop=True)
 
@@ -101,13 +175,23 @@ def train_baseline(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def split_data(df: pd.DataFrame, feature_cols: List[str], target_col: str = "sales") -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """Split the data into train and validation sets using the last calendar block."""
-    df = df.copy()
+    """Split the data into train and validation sets using the last calendar block.
+
+    If the dataset is too small or the last 30-day split is empty, fall back to an 80/20 row split.
+    """
+    df = df.copy().sort_values("date")
     last_date = df["date"].max()
     cutoff_date = last_date - pd.Timedelta(days=30)
 
     train = df[df["date"] <= cutoff_date]
     valid = df[df["date"] > cutoff_date]
+
+    if train.empty or valid.empty:
+        if len(df) < 5:
+            return df[feature_cols], pd.DataFrame(columns=feature_cols), df[target_col], pd.Series([], dtype=df[target_col].dtype)
+        split_index = max(1, int(len(df) * 0.8))
+        train = df.iloc[:split_index]
+        valid = df.iloc[split_index:]
 
     X_train = train[feature_cols]
     y_train = train[target_col]

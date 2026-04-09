@@ -2,8 +2,10 @@ import io
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import chardet
 import pandas as pd
 import streamlit as st
 
@@ -38,14 +40,14 @@ def compute_shopkeeper_insights(df: pd.DataFrame) -> dict:
     no_recent_sales = recent_window.groupby("item_id")["sales"].sum().reset_index()
     for _, row in no_recent_sales.iterrows():
         if row["sales"] == 0:
-            out_of_stock.append(int(row["item_id"]))
+            out_of_stock.append(str(row["item_id"]))
 
-    summary["best_sellers"] = best_sellers["item_id"].astype(int).tolist()
-    summary["slow_movers"] = slow_movers["item_id"].astype(int).tolist()
+    summary["best_sellers"] = best_sellers["item_id"].astype(str).tolist()
+    summary["slow_movers"] = slow_movers["item_id"].astype(str).tolist()
     summary["out_of_stock"] = out_of_stock
-    summary["top_item"] = int(best_sellers.iloc[0]["item_id"])
+    summary["top_item"] = str(best_sellers.iloc[0]["item_id"])
     summary["top_sales"] = int(best_sellers.iloc[0]["total_sales"])
-    summary["lowest_item"] = int(slow_movers.iloc[0]["item_id"])
+    summary["lowest_item"] = str(slow_movers.iloc[0]["item_id"])
     summary["lowest_recent_avg"] = float(slow_movers.iloc[0]["recent_avg"])
     return summary
 
@@ -79,9 +81,31 @@ def show_restock_table(restock_df: pd.DataFrame) -> None:
     disp = restock_df.copy()
     disp['demand_signal'] = disp['demand_signal'].round(2)
     disp = disp[['store_id', 'item_id', 'mean', 'std', 'sum', 'count', 'demand_signal']]
-    st.dataframe(disp.style.format({
-        'mean': '{:.1f}', 'std': '{:.1f}', 'sum': '{:.0f}', 'count': '{:.0f}', 'demand_signal': '{:.2f}'
-    }))
+    st.write("### Restock suggestions (higher demand_signal = higher priority)")
+
+    # Styled HTML table with color bands based on demand_signal
+    styler = disp.style.background_gradient(subset=['demand_signal'], cmap='YlOrRd')
+    styler = styler.format({'mean': '{:.1f}', 'std': '{:.1f}', 'sum': '{:.0f}', 'count': '{:.0f}', 'demand_signal': '{:.2f}'})
+    st.markdown(styler.to_html(), unsafe_allow_html=True)
+
+    # Allow the shopkeeper to select items to include in a reorder list
+    options = [f"{int(r['store_id'])}-{int(r['item_id'])}" for r in disp.to_dict(orient='records')]
+    selected = st.multiselect("Select items to include in reorder list (store-item)", options, default=options)
+
+    if selected:
+        chosen_rows = []
+        for s in selected:
+            store_id, item_id = s.split('-')
+            mask = (disp['store_id'].astype(str) == store_id) & (disp['item_id'].astype(str) == item_id)
+            chosen_rows.extend(disp[mask].to_dict(orient='records'))
+        chosen_df = pd.DataFrame(chosen_rows)
+        if not chosen_df.empty:
+            st.write("#### Reorder preview")
+            st.dataframe(chosen_df)
+            csv_bytes = chosen_df.to_csv(index=False).encode('utf-8')
+            st.download_button("Download reorder list as CSV", csv_bytes, file_name="reorder_list.csv", mime="text/csv")
+    else:
+        st.info("No items selected for reorder list.")
 
 
 def sparkline_figure(item_id: int, df: pd.DataFrame, days: int = 60):
@@ -135,21 +159,140 @@ with st.sidebar:
 
 
 def load_sales_dataframe(uploaded_file, local_path):
+    # Helper: try multiple encodings and delimiter sniffing
+    def _try_read_bytes(b: bytes):
+        last_exc = None
+        # Try chardet first
+        try:
+            det = chardet.detect(b)
+            enc = det.get("encoding") or "utf-8"
+            return pd.read_csv(io.BytesIO(b), encoding=enc, sep=None, engine="python")
+        except Exception as e:
+            last_exc = e
+
+        # Fallback encodings
+        encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252", "iso-8859-1"]
+        for enc in encodings:
+            try:
+                return pd.read_csv(io.BytesIO(b), encoding=enc, sep=None, engine="python")
+            except Exception as e:
+                last_exc = e
+        raise last_exc
+
+    def _try_read_path(p: str):
+        last_exc = None
+        # Try chardet by reading initial bytes
+        try:
+            with open(p, "rb") as fh:
+                raw = fh.read(100000)
+            det = chardet.detect(raw)
+            enc = det.get("encoding") or "utf-8"
+            return pd.read_csv(p, encoding=enc, sep=None, engine="python")
+        except Exception as e:
+            last_exc = e
+
+        # Fallback encodings
+        encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252", "iso-8859-1"]
+        for enc in encodings:
+            try:
+                return pd.read_csv(p, encoding=enc, sep=None, engine="python")
+            except Exception as e:
+                last_exc = e
+        raise last_exc
+
     if uploaded_file is not None:
         raw = uploaded_file.read()
-        buffer = io.BytesIO(raw)
-        df = pd.read_csv(buffer, parse_dates=["date"])
+        try:
+            df = _try_read_bytes(raw)
+        except Exception as e:
+            raise ValueError(f"Unable to parse uploaded CSV: {e}")
     elif local_path is not None and Path(local_path).exists():
-        df = pd.read_csv(local_path, parse_dates=["date"])
+        try:
+            df = _try_read_path(local_path)
+        except Exception as e:
+            raise ValueError(f"Unable to parse CSV at {local_path}: {e}")
     else:
         raise FileNotFoundError("No valid CSV file path or upload provided.")
 
-    required_cols = {"date", "store_id", "item_id", "sales"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+    # Normalize possible column names to required schema
+    def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+        cols = {c.lower(): c for c in df.columns}
+        mapping = {}
+        candidates = {
+            "date": ["date", "order_date", "orderdate", "ship_date", "shipped_date", "timestamp", "time", "day", "invoice_date", "created_at"],
+            "store_id": ["store_id", "store", "storeid", "shop_id", "customername", "customer_name", "territory", "country", "city", "ordernumber", "order_number"],
+            "item_id": ["item_id", "item", "product_id", "product", "sku", "productcode", "product_code", "productline", "product_line", "model"],
+            "sales": ["sales", "revenue", "amount", "total", "total_sales", "sale", "sales_amount"]
+        }
+        for std, cands in candidates.items():
+            for cand in cands:
+                if cand in cols:
+                    mapping[cols[cand]] = std
+                    break
 
-    return df.sort_values(["store_id", "item_id", "date"]).reset_index(drop=True)
+        df = df.rename(columns=mapping)
+
+        # Try to compute sales from quantity and price if sales is missing.
+        if "sales" not in df.columns:
+            qty_key = None
+            price_key = None
+            for cand in ["quantityordered", "quantity_ordered", "qty", "quantity", "units_sold"]:
+                if cand in cols:
+                    qty_key = cols[cand]
+                    break
+            for cand in ["priceeach", "price_each", "price", "unit_price", "amount"]:
+                if cand in cols:
+                    price_key = cols[cand]
+                    break
+            if qty_key and price_key:
+                df["sales"] = pd.to_numeric(df[qty_key], errors="coerce") * pd.to_numeric(df[price_key], errors="coerce")
+            elif qty_key and "sales" not in df.columns:
+                df["sales"] = pd.to_numeric(df[qty_key], errors="coerce")
+
+        # If item_id is still missing, use productcode or productline if available.
+        if "item_id" not in df.columns:
+            for cand in ["productcode", "product_code", "productline", "product_line", "item", "model"]:
+                if cand in cols:
+                    df["item_id"] = df[cols[cand]]
+                    break
+
+        # If store_id is still missing, use ordernumber or customer name or fall back to a single store.
+        if "store_id" not in df.columns:
+            if "ordernumber" in cols:
+                df["store_id"] = pd.to_numeric(df[cols["ordernumber"]], errors="coerce")
+            elif "customername" in cols:
+                df["store_id"] = df[cols["customername"]].astype(str).factorize()[0] + 1
+            else:
+                df["store_id"] = 1
+
+        required = {"date", "store_id", "item_id", "sales"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns after normalization: {missing}")
+        return df
+
+    try:
+        df = _normalize_columns(df)
+    except Exception as e:
+        raise ValueError(f"Column normalization failed: {e}")
+
+    # Parse and coerce types
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
+    df["item_id"] = df["item_id"].astype(str).str.strip()
+    df["store_id"] = df["store_id"].astype(str).str.strip()
+    df["store_id"] = pd.factorize(df["store_id"])[0] + 1
+
+    before = len(df)
+    df = df.dropna(subset=["date", "item_id", "sales"])  # remove unusable rows
+    after = len(df)
+    dropped = before - after
+
+    if dropped > 0:
+        st.warning(f"Dropped {dropped} rows due to missing/invalid date, id, or sales values.")
+
+    df = df.sort_values(["store_id", "item_id", "date"]).reset_index(drop=True)
+    return df
 
 
 def plot_actual_vs_predicted(df, model, feature_cols, store_id, item_id):
@@ -249,17 +392,34 @@ if st.button("Run forecasting"):
         df = train_baseline(df)
         df_features, feature_cols = prepare_features(df)
         X_train, X_valid, y_train, y_valid = split_data(df_features, feature_cols)
-        rf_model = train_random_forest(X_train, y_train)
-        lgb_model = train_lightgbm(X_train, y_train, X_valid, y_valid)
 
-        y_pred_rf = rf_model.predict(X_valid)
-        y_pred_lgb = lgb_model.predict(X_valid)
-        metrics_rf = evaluate_forecasts(y_valid.values, y_pred_rf)
-        metrics_lgb = evaluate_forecasts(y_valid.values, y_pred_lgb)
-        chosen_model = lgb_model if metrics_lgb["rmse"] <= metrics_rf["rmse"] else rf_model
+        if X_train.empty or len(y_train) < 2:
+            st.warning(
+                "Not enough structured time-series data to train a model. "
+                "Try a larger dataset or expand the selected date range."
+            )
+            forecast_df = pd.DataFrame(
+                {
+                    "date": [],
+                    "store_id": [],
+                    "item_id": [],
+                    "sales_forecast": [],
+                }
+            )
+            restock_df = suggest_restocking(df)
+            metrics_rf = metrics_lgb = {"rmse": None, "mae": None, "smape": None}
+            chosen_model = None
+        else:
+            rf_model = train_random_forest(X_train, y_train)
+            lgb_model = train_lightgbm(X_train, y_train, X_valid, y_valid)
 
-        forecast_df = forecast_next_days(df_features, chosen_model, feature_cols, forecast_days=forecast_days)
-        restock_df = suggest_restocking(df)
+            y_pred_rf = rf_model.predict(X_valid) if not X_valid.empty else np.array([])
+            y_pred_lgb = lgb_model.predict(X_valid) if not X_valid.empty else np.array([])
+            metrics_rf = evaluate_forecasts(y_valid.values, y_pred_rf) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
+            metrics_lgb = evaluate_forecasts(y_valid.values, y_pred_lgb) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
+            chosen_model = lgb_model if metrics_lgb["rmse"] is not None and metrics_rf["rmse"] is not None and metrics_lgb["rmse"] <= metrics_rf["rmse"] else rf_model
+            forecast_df = forecast_next_days(df_features, chosen_model, feature_cols, forecast_days=forecast_days)
+            restock_df = suggest_restocking(df)
 
     st.write("## Model comparison")
     comparison = pd.DataFrame([metrics_rf, metrics_lgb], index=["Random Forest", "LightGBM"])
@@ -280,10 +440,12 @@ if st.button("Run forecasting"):
     st.write("## Explore store-item predictions")
     stores = sorted(df["store_id"].unique())
     items = sorted(df["item_id"].unique())
-    if stores and items:
+    if stores and items and chosen_model is not None:
         selected_store = st.selectbox("Choose store", stores)
         selected_item = st.selectbox("Choose item", items)
         plot_actual_vs_predicted(df_features, chosen_model, feature_cols, selected_store, selected_item)
+    elif stores and items:
+        st.info("Model training was skipped because the dataset is too small, so predictions are not available.")
     else:
         st.warning("Dataset needs at least one store and one item to plot predictions.")
 
