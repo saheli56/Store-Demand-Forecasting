@@ -162,11 +162,22 @@ st.markdown(
 
 with st.sidebar:
     st.header("Data input")
+    st.markdown(
+        "Upload your sales data here. Use drag-and-drop or click the button below to select a CSV file. "
+        "If you prefer, choose the Local file path option and enter a path to a CSV file on disk."
+    )
     data_source = st.radio("Choose data source", ["Upload CSV", "Local file path"], index=0, key="data_source")
     uploaded_file = None
     local_path = "dummy_sales.csv"
     if data_source == "Upload CSV":
-        uploaded_file = st.file_uploader("Upload a sales CSV file", type="csv", key="uploaded_file")
+        uploaded_file = st.file_uploader(
+            "Upload a sales CSV file",
+            type="csv",
+            key="uploaded_file",
+            help="Drag and drop a CSV file here or click Choose File.",
+        )
+        if uploaded_file is None:
+            st.info("Drop a CSV file into this widget or click Choose File to upload.")
     else:
         local_path = st.text_input("Local CSV path", "dummy_sales.csv", key="local_path")
 
@@ -280,34 +291,57 @@ def load_sales_dataframe(uploaded_file, local_path):
             else:
                 df["store_id"] = 1
 
-        required = {"date", "store_id", "item_id", "sales"}
-        missing = required - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing required columns after normalization: {missing}")
         return df
 
     try:
         df = _normalize_columns(df)
     except Exception as e:
-        raise ValueError(f"Column normalization failed: {e}")
+        raise ValueError(
+            f"Column normalization failed: {e}. "
+            "Please upload a sales dataset with date and sales columns."
+        )
 
-    # Parse and coerce types
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
-    df["item_id"] = df["item_id"].astype(str).str.strip()
-    df["store_id"] = df["store_id"].astype(str).str.strip()
-    df["store_id"] = pd.factorize(df["store_id"])[0] + 1
+    # Parse and coerce types when available
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    if "sales" in df.columns:
+        df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
+    if "item_id" in df.columns:
+        df["item_id"] = df["item_id"].astype(str).str.strip()
+    if "store_id" in df.columns:
+        df["store_id"] = df["store_id"].astype(str).str.strip()
+        df["store_id"] = pd.factorize(df["store_id"])[0] + 1
 
     before = len(df)
-    df = df.dropna(subset=["date", "item_id", "sales"])  # remove unusable rows
+    drop_cols = [col for col in ["date", "item_id", "sales"] if col in df.columns]
+    if drop_cols:
+        df = df.dropna(subset=drop_cols)  # remove unusable rows
     after = len(df)
     dropped = before - after
 
     if dropped > 0:
         st.warning(f"Dropped {dropped} rows due to missing/invalid date, id, or sales values.")
 
-    df = df.sort_values(["store_id", "item_id", "date"]).reset_index(drop=True)
+    sort_cols = [col for col in ["store_id", "item_id", "date"] if col in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols).reset_index(drop=True)
     return df
+
+
+def validate_sales_dataset(df: pd.DataFrame) -> None:
+    required = {"date", "sales", "item_id", "store_id"}
+    missing = required - set(df.columns)
+    if missing:
+        st.error(
+            "This file does not contain the required sales time-series columns. "
+            f"Missing: {sorted(missing)}. "
+            "For forecasting, upload a dataset with date, sales, item_id, and store_id."
+        )
+        st.write("Detected columns:", list(df.columns))
+        st.info(
+            "You can still preview the raw dataset here, but forecasting charts and demand predictions are only available for sales datasets."
+        )
+        st.stop()
 
 
 def plot_actual_vs_predicted(df, model, feature_cols, store_id, item_id):
@@ -352,6 +386,9 @@ if st.session_state.get("current_df") is not None:
     st.success("Dataset loaded successfully.")
     st.write("### Dataset sample")
     st.dataframe(df.head(10))
+
+    validate_sales_dataset(df)
+
     st.write(
         "### Dataset summary",
         {

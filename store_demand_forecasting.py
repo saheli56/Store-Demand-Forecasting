@@ -146,6 +146,10 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     df = create_date_features(df)
     df = create_lag_and_rolling_features(df)
 
+    # Ensure identifiers are numeric for model training.
+    df["item_id"] = pd.factorize(df["item_id"].astype(str))[0] + 1
+    df["store_id"] = pd.factorize(df["store_id"].astype(str))[0] + 1
+
     # Drop the earliest rows that do not have lag feature values.
     features = [
         "day",
