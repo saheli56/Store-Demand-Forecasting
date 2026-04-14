@@ -23,6 +23,18 @@ from store_demand_forecasting import (
 st.set_page_config(page_title="Store Demand Forecasting", layout="wide")
 
 
+def safe_rerun():
+    """Try to rerun the Streamlit script; no-op if API is unavailable."""
+    try:
+        # Some Streamlit versions expose experimental_rerun(), others don't
+        rerun = getattr(st, "experimental_rerun", None)
+        if callable(rerun):
+            rerun()
+    except Exception:
+        # Fallback: do nothing; widget interactions will trigger reruns
+        return
+
+
 def build_input_key(data_source: str, local_path: str, uploaded_file) -> str:
     uploaded_name = uploaded_file.name if uploaded_file is not None else ""
     uploaded_size = getattr(uploaded_file, "size", "")
@@ -39,31 +51,71 @@ def cache_results(input_key: str, results: dict):
 
 
 def compute_shopkeeper_insights(df: pd.DataFrame) -> dict:
-    summary = {}
-    item_total = df.groupby("item_id")["sales"].sum().reset_index(name="total_sales")
+    summary = {
+        "best_sellers": [],
+        "slow_movers": [],
+        "out_of_stock": [],
+        "top_item": "",
+        "top_sales": 0,
+        "lowest_item": "",
+        "lowest_recent_avg": 0.0,
+    }
 
-    recent = df[df["date"] >= df["date"].max() - pd.Timedelta(days=90)]
-    recent_avg = recent.groupby("item_id")["sales"].mean().reset_index(name="recent_avg")
-    item_summary = item_total.merge(recent_avg, on="item_id", how="left").fillna(0)
-    item_summary["recent_share"] = item_summary["recent_avg"] / (item_summary["total_sales"] / 120 + 1e-9)
+    # Defensive: if DataFrame is empty or missing required columns, return defaults
+    if df is None or df.empty:
+        return summary
+    if not all(c in df.columns for c in ["item_id", "sales", "date"]):
+        # Try to compute partial info if possible
+        if "item_id" in df.columns and "sales" in df.columns:
+            item_total = df.groupby("item_id")["sales"].sum().reset_index(name="total_sales")
+            top = item_total.sort_values("total_sales", ascending=False).head(1)
+            if not top.empty:
+                summary["best_sellers"] = item_total.sort_values("total_sales", ascending=False).head(3)["item_id"].astype(str).tolist()
+                summary["top_item"] = str(top.iloc[0]["item_id"])
+                summary["top_sales"] = int(top.iloc[0]["total_sales"])
+        return summary
 
-    best_sellers = item_summary.sort_values("total_sales", ascending=False).head(3)
-    slow_movers = item_summary.sort_values("recent_share").head(3)
+    try:
+        item_total = df.groupby("item_id")["sales"].sum().reset_index(name="total_sales")
 
-    out_of_stock = []
-    recent_window = df[df["date"] >= df["date"].max() - pd.Timedelta(days=14)]
-    no_recent_sales = recent_window.groupby("item_id")["sales"].sum().reset_index()
-    for _, row in no_recent_sales.iterrows():
-        if row["sales"] == 0:
-            out_of_stock.append(str(row["item_id"]))
+        # Recent window for trend calculations
+        max_date = df["date"].max()
+        if pd.isna(max_date):
+            recent = df.copy()
+        else:
+            recent = df[df["date"] >= max_date - pd.Timedelta(days=90)]
 
-    summary["best_sellers"] = best_sellers["item_id"].astype(str).tolist()
-    summary["slow_movers"] = slow_movers["item_id"].astype(str).tolist()
-    summary["out_of_stock"] = out_of_stock
-    summary["top_item"] = str(best_sellers.iloc[0]["item_id"])
-    summary["top_sales"] = int(best_sellers.iloc[0]["total_sales"])
-    summary["lowest_item"] = str(slow_movers.iloc[0]["item_id"])
-    summary["lowest_recent_avg"] = float(slow_movers.iloc[0]["recent_avg"])
+        recent_avg = recent.groupby("item_id")["sales"].mean().reset_index(name="recent_avg")
+        item_summary = item_total.merge(recent_avg, on="item_id", how="left").fillna(0)
+        item_summary["recent_share"] = item_summary["recent_avg"] / (item_summary["total_sales"] / 120 + 1e-9)
+
+        best_sellers = item_summary.sort_values("total_sales", ascending=False).head(3)
+        slow_movers = item_summary.sort_values("recent_share").head(3)
+
+        # Out-of-stock detection: items with zero sales in recent 14 days
+        out_of_stock = []
+        if not pd.isna(max_date):
+            recent_window = df[df["date"] >= max_date - pd.Timedelta(days=14)]
+            if not recent_window.empty:
+                no_recent_sales = recent_window.groupby("item_id")["sales"].sum().reset_index()
+                for _, row in no_recent_sales.iterrows():
+                    if row["sales"] == 0:
+                        out_of_stock.append(str(row["item_id"]))
+
+        summary["best_sellers"] = best_sellers["item_id"].astype(str).tolist() if not best_sellers.empty else []
+        summary["slow_movers"] = slow_movers["item_id"].astype(str).tolist() if not slow_movers.empty else []
+        summary["out_of_stock"] = out_of_stock
+
+        if not best_sellers.empty:
+            summary["top_item"] = str(best_sellers.iloc[0]["item_id"])
+            summary["top_sales"] = int(best_sellers.iloc[0]["total_sales"])
+        if not slow_movers.empty:
+            summary["lowest_item"] = str(slow_movers.iloc[0]["item_id"])
+            summary["lowest_recent_avg"] = float(slow_movers.iloc[0]["recent_avg"])
+    except Exception:
+        # On any unexpected error, return safe defaults already set
+        return summary
+
     return summary
 
 
@@ -265,13 +317,72 @@ with st.sidebar:
         )
         if uploaded_file is None:
             st.info("Drop a CSV file into this widget or click Choose File to upload.")
+        # Allow preview and schema mapping: read a small sample from the uploaded bytes
+        uploaded_bytes = None
+        preview_columns = []
+        if uploaded_file is not None:
+            try:
+                uploaded_bytes = uploaded_file.read()
+                preview_df = pd.read_csv(io.BytesIO(uploaded_bytes), nrows=5)
+                preview_columns = list(preview_df.columns)
+            except Exception:
+                preview_columns = []
+        else:
+            uploaded_bytes = None
+
+        # Schema mapping UI
+        st.markdown("**Column mapping (optional)** — help the app find required fields if names differ")
+        col_options = ["<Infer>", "None"] + preview_columns
+        date_map = st.selectbox("Map `date` column", col_options, index=0, key="map_date")
+        store_map = st.selectbox("Map `store_id` column", col_options, index=0, key="map_store")
+        item_map = st.selectbox("Map `item_id` column", col_options, index=0, key="map_item")
+        sales_map = st.selectbox("Map `sales` column", col_options, index=0, key="map_sales")
+        user_mapping = {}
+        if date_map not in ("<Infer>", "None"):
+            user_mapping["date"] = date_map
+        if store_map not in ("<Infer>", "None"):
+            user_mapping["store_id"] = store_map
+        if item_map not in ("<Infer>", "None"):
+            user_mapping["item_id"] = item_map
+        if sales_map not in ("<Infer>", "None"):
+            user_mapping["sales"] = sales_map
+
+        # Persist preview bytes and mapping so main flow can access them
+        st.session_state["uploaded_bytes"] = uploaded_bytes
+        st.session_state["user_mapping"] = user_mapping
+
+        # Buttons to apply mapping or refresh visuals
+        if uploaded_bytes is not None:
+            if st.button("Apply mapping", key="apply_mapping"):
+                # Set a flag (different name than widget key) so the main flow will re-load the dataset with mapping
+                st.session_state["apply_mapping_flag"] = True
+                # Clear previous run results so outputs refresh after reloading
+                st.session_state.pop("run_results", None)
+                safe_rerun()
+
+            if st.button("Refresh visuals", key="refresh_visuals"):
+                # Clear cached run results so visuals recompute from current_df
+                st.session_state.pop("run_results", None)
+                st.success("Visuals will refresh using the current dataset.")
+                safe_rerun()
+
+        # Sample CSV download
+        try:
+            with open("sample_sales.csv", "rb") as sf:
+                sample_bytes = sf.read()
+            st.download_button("Download sample sales CSV", sample_bytes, file_name="sample_sales.csv", mime="text/csv")
+        except Exception:
+            pass
     else:
         local_path = st.text_input("Local CSV path", "dummy_sales.csv", key="local_path")
+        # clear any uploaded bytes/mapping when using local path
+        st.session_state["uploaded_bytes"] = None
+        st.session_state["user_mapping"] = {}
 
     forecast_days = st.slider("Forecast horizon", min_value=7, max_value=90, value=30, step=7, key="forecast_days")
 
 
-def load_sales_dataframe(uploaded_file, local_path):
+def load_sales_dataframe(uploaded_file, local_path, user_mapping: dict = None):
     # Helper: try multiple encodings and delimiter sniffing
     def _try_read_bytes(b: bytes):
         last_exc = None
@@ -314,7 +425,11 @@ def load_sales_dataframe(uploaded_file, local_path):
         raise last_exc
 
     if uploaded_file is not None:
-        raw = uploaded_file.read()
+        # uploaded_file can be raw bytes (from mapping UI) or a file-like uploaded object
+        if isinstance(uploaded_file, (bytes, bytearray)):
+            raw = uploaded_file
+        else:
+            raw = uploaded_file.read()
         try:
             df = _try_read_bytes(raw)
         except Exception as e:
@@ -349,7 +464,7 @@ def load_sales_dataframe(uploaded_file, local_path):
         if "sales" not in df.columns:
             qty_key = None
             price_key = None
-            for cand in ["quantityordered", "quantity_ordered", "qty", "quantity", "units_sold"]:
+            for cand in ["quantityordered", "quantity_ordered", "qty_ordered", "qty", "quantity", "units_sold", "order_qty", "order_quantity", "units"]:
                 if cand in cols:
                     qty_key = cols[cand]
                     break
@@ -380,7 +495,12 @@ def load_sales_dataframe(uploaded_file, local_path):
 
         return df
 
+    # If user provided explicit mappings, apply them before normalization
     try:
+        if user_mapping:
+            rename_map = {v: k for k, v in user_mapping.items() if v in df.columns}
+            if rename_map:
+                df = df.rename(columns=rename_map)
         df = _normalize_columns(df)
     except Exception as e:
         raise ValueError(
@@ -459,12 +579,18 @@ if st.session_state.get("input_key") != input_key:
     st.session_state["current_df"] = None
     st.session_state["run_results"] = None
 
-if st.session_state.get("current_df") is None:
+if st.session_state.get("current_df") is None or st.session_state.get("apply_mapping_flag"):
     try:
-        if data_source == "Upload CSV" and uploaded_file is not None:
-            st.session_state["current_df"] = load_sales_dataframe(uploaded_file, None)
+        # If user requested to apply mapping, reload the uploaded bytes using user_mapping
+        if data_source == "Upload CSV" and st.session_state.get("uploaded_bytes") is not None:
+            # Only reload when apply_mapping flag is set or when no current_df exists
+            if st.session_state.get("current_df") is None or st.session_state.get("apply_mapping_flag"):
+                st.session_state["current_df"] = load_sales_dataframe(
+                    st.session_state.get("uploaded_bytes"), None, st.session_state.get("user_mapping", {})
+                )
+                st.session_state.pop("apply_mapping_flag", None)
         elif data_source == "Local file path" and local_path:
-            st.session_state["current_df"] = load_sales_dataframe(None, local_path)
+            st.session_state["current_df"] = load_sales_dataframe(None, local_path, st.session_state.get("user_mapping", {}))
     except Exception as exc:
         st.error(f"Unable to load dataset: {exc}")
 

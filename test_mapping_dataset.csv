@@ -1,0 +1,9 @@
+order_date,shop_name,sku_code,qty_ordered,price_each,customer_name,order_no
+2026-03-01,North Store,SKU-100A,5,2.50,Acme Corp,10001
+2026-03-02,North Store,SKU-100A,3,2.50,Acme Corp,10002
+2026-03-01,South Outlet,SKU-200B,8,1.75,Zen Supplies,10003
+2026-03-02,South Outlet,SKU-200B,6,1.75,Zen Supplies,10004
+2026-03-03,North Store,SKU-100A,7,2.50,Acme Corp,10005
+2026-03-04,East Kiosk,SKU-300C,2,5.00,Shop LLC,10006
+2026-03-05,East Kiosk,SKU-300C,4,5.00,Shop LLC,10007
+2026-03-06,West Depot,SKU-400D,1,10.00,Buyer Inc,10008

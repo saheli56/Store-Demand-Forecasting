@@ -55,7 +55,7 @@ def load_sales_data(csv_path: str) -> pd.DataFrame:
     if "sales" not in df.columns:
         qty_key = None
         price_key = None
-        for cand in ["quantityordered", "quantity_ordered", "qty", "quantity", "units_sold"]:
+        for cand in ["quantityordered", "quantity_ordered", "qty_ordered", "qty", "quantity", "units_sold", "order_qty", "order_quantity", "units"]:
             if cand in cols:
                 qty_key = cols[cand]
                 break
