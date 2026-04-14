@@ -154,6 +154,93 @@ def show_top_item_cards(df: pd.DataFrame, top_n: int = 4):
             st.plotly_chart(sparkline_figure(item, df), use_container_width=True)
             st.caption(f"Total sales: {total} — Avg last 30d: {recent:.1f}")
 
+
+def plot_animated_top_sellers(df: pd.DataFrame, top_n: int = 5):
+    if df.empty or "date" not in df.columns or "sales" not in df.columns:
+        return
+    top_items = df.groupby('item_id')['sales'].sum().nlargest(top_n).index.tolist()
+    recent = df[df['date'] >= df['date'].max() - pd.Timedelta(days=60)]
+    if recent.empty:
+        recent = df.copy()
+    daily = (
+        recent[recent['item_id'].isin(top_items)]
+        .groupby(['date', 'item_id'], as_index=False)['sales']
+        .sum()
+        .sort_values(['date', 'item_id'])
+    )
+    if daily.empty:
+        return
+    daily['date_str'] = daily['date'].dt.strftime('%Y-%m-%d')
+    fig = px.bar(
+        daily,
+        x='item_id',
+        y='sales',
+        color='item_id',
+        animation_frame='date_str',
+        animation_group='item_id',
+        range_y=[0, daily['sales'].max() * 1.2],
+        labels={'item_id': 'Item ID', 'sales': 'Sales', 'date_str': 'Date'},
+        title=f'Top {top_n} item sales animation',
+        color_discrete_sequence=px.colors.qualitative.Vivid,
+    )
+    fig.update_layout(
+        title_x=0.5,
+        showlegend=False,
+        bargap=0.2,
+        xaxis={'categoryorder': 'total descending'},
+        transition={'duration': 600},
+    )
+    fig.update_traces(texttemplate='%{y:.0f}', textposition='outside')
+    # Make the animation play slower by increasing frame and transition durations
+    try:
+        fig.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 1200
+        fig.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 600
+    except Exception:
+        # If layout controls aren't present, set transition as a fallback
+        fig.update_layout(transition={'duration': 600})
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def plot_animated_sales_bubble(df: pd.DataFrame, top_n: int = 6):
+    if df.empty or "date" not in df.columns or "sales" not in df.columns:
+        return
+    top_items = df.groupby('item_id')['sales'].sum().nlargest(top_n).index.tolist()
+    daily = (
+        df[df['item_id'].isin(top_items)]
+        .groupby(['date', 'item_id'], as_index=False)['sales']
+        .sum()
+        .sort_values(['date', 'item_id'])
+    )
+    if daily.empty:
+        return
+    daily['date_str'] = daily['date'].dt.strftime('%Y-%m-%d')
+    fig = px.scatter(
+        daily,
+        x='item_id',
+        y='sales',
+        size='sales',
+        color='item_id',
+        animation_frame='date_str',
+        animation_group='item_id',
+        range_y=[0, daily['sales'].max() * 1.2],
+        size_max=45,
+        labels={'item_id': 'Item ID', 'sales': 'Sales', 'date_str': 'Date'},
+        title=f'Sales momentum for top {top_n} items',
+        color_discrete_sequence=px.colors.qualitative.Prism,
+    )
+    fig.update_layout(title_x=0.5, showlegend=False, transition={'duration': 300})
+    # Slow down animation frames for better readability
+    try:
+        fig.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 1400
+        fig.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 700
+    except Exception:
+        fig.update_layout(transition={'duration': 700})
+
+    # Reduce marker clutter: use consistent sizing and circular markers
+    fig.update_traces(marker=dict(sizemode='area', sizeref=2, line=dict(width=0.5, color='DarkSlateGrey')))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 st.title("Store Demand Forecasting Dashboard")
 st.markdown(
     "This app trains demand forecasting models from historical sales data, "
@@ -418,37 +505,68 @@ if st.session_state.get("current_df") is not None:
         filtered_df = filtered_df[filtered_df['store_id'] == selected_store]
 
     insights = compute_shopkeeper_insights(filtered_df)
-    st.write("## Quick Actions & KPIs")
-    create_summary_metrics(insights)
+    restock_df = suggest_restocking(filtered_df)
+    out_of_stock_items = insights['out_of_stock']
 
-    # Additional professional KPIs
-    total_sales = int(filtered_df['sales'].sum())
-    avg_daily = float(filtered_df.groupby('date')['sales'].sum().mean()) if not filtered_df.empty else 0.0
-    top_store = int(filtered_df.groupby('store_id')['sales'].sum().idxmax()) if not filtered_df.empty else None
-    out_count = len(insights['out_of_stock'])
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total Sales", f"{total_sales}")
-    k2.metric("Avg Daily Sales", f"{avg_daily:.1f}")
-    k3.metric("Top Store", f"Store {top_store}" if top_store is not None else "N/A")
-    k4.metric("Out-of-stock items", f"{out_count}")
+    st.write("## Inventory action")
+    action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
+    action_col1.metric("Out of stock", f"{len(out_of_stock_items)}", "Check these items first")
+    action_col2.metric(
+        "Restock priority",
+        f"{min(len(restock_df), 5)} candidates",
+        "High demand items",
+    )
+    action_col3.metric(
+        "Top seller",
+        f"Item {insights['top_item']}",
+        f"{insights['top_sales']} total sales",
+    )
 
-    st.write("### Sales story")
-    if insights["out_of_stock"]:
+    with st.expander("View restock priority list", expanded=True):
+        st.dataframe(
+            restock_df[['store_id', 'item_id', 'mean', 'std', 'demand_signal']]
+            .head(10)
+            .rename(columns={
+                'mean': 'Avg sales',
+                'std': 'Sales std',
+                'demand_signal': 'Priority score',
+            }),
+            use_container_width=True,
+        )
+
+    if out_of_stock_items:
         st.warning(
-            f"The following item IDs have had no sales in the last 14 days: {', '.join(str(x) for x in insights['out_of_stock'])}. "
-            "Please check your inventory or reorder them quickly."
+            "Out-of-stock item IDs: "
+            + ", ".join(str(x) for x in out_of_stock_items[:10])
+            + ("..." if len(out_of_stock_items) > 10 else "")
         )
     else:
         st.success("No likely out-of-stock items detected in the selected window.")
 
-    st.write("### Top items — quick view")
-    show_top_item_cards(filtered_df, top_n=4)
+    st.write("### Key sales summary")
+    total_sales = int(filtered_df['sales'].sum())
+    avg_daily = float(filtered_df.groupby('date')['sales'].sum().mean()) if not filtered_df.empty else 0.0
+    top_store = int(filtered_df.groupby('store_id')['sales'].sum().idxmax()) if not filtered_df.empty else None
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total Sales", f"{total_sales}")
+    k2.metric("Avg Daily Sales", f"{avg_daily:.1f}")
+    k3.metric("Top Store", f"Store {top_store}" if top_store is not None else "N/A")
 
-    st.write("### Top-selling products (interactive)")
-    plot_interactive_top_sellers(filtered_df)
+    with st.expander("More product analytics", expanded=False):
+        st.write("#### Top items — quick view")
+        show_top_item_cards(filtered_df, top_n=4)
 
-    st.write("### Slow-moving products (possible overstock risks)")
-    plot_interactive_slow_movers(filtered_df)
+        st.write("#### Animated top item sales")
+        plot_animated_top_sellers(filtered_df, top_n=5)
+
+        st.write("#### Sales momentum bubble")
+        plot_animated_sales_bubble(filtered_df, top_n=5)
+
+        st.write("#### Top-selling products")
+        plot_interactive_top_sellers(filtered_df)
+
+        st.write("#### Slow-moving products")
+        plot_interactive_slow_movers(filtered_df)
 
     run = st.button("Run forecasting", key="run_forecasting")
     results = get_cached_results(input_key)
