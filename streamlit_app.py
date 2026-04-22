@@ -162,7 +162,7 @@ def show_restock_table(restock_df: pd.DataFrame) -> None:
     if selected:
         chosen_rows = []
         for s in selected:
-            store_id, item_id = s.split('-')
+            store_id, item_id = s.split('-', 1)
             mask = (disp['store_id'].astype(str) == store_id) & (disp['item_id'].astype(str) == item_id)
             chosen_rows.extend(disp[mask].to_dict(orient='records'))
         chosen_df = pd.DataFrame(chosen_rows)
@@ -211,7 +211,7 @@ def plot_animated_top_sellers(df: pd.DataFrame, top_n: int = 5):
     if df.empty or "date" not in df.columns or "sales" not in df.columns:
         return
     top_items = df.groupby('item_id')['sales'].sum().nlargest(top_n).index.tolist()
-    recent = df[df['date'] >= df['date'].max() - pd.Timedelta(days=60)]
+    recent = df[df['date'] >= df['date'].max() - pd.Timedelta(days=90)]
     if recent.empty:
         recent = df.copy()
     daily = (
@@ -222,34 +222,36 @@ def plot_animated_top_sellers(df: pd.DataFrame, top_n: int = 5):
     )
     if daily.empty:
         return
-    daily['date_str'] = daily['date'].dt.strftime('%Y-%m-%d')
-    fig = px.bar(
-        daily,
-        x='item_id',
+
+    # Build cumulative frames so lines grow over time for better readability
+    dates = sorted(daily['date'].unique())
+    frames = []
+    for d in dates:
+        tmp = daily[daily['date'] <= d].copy()
+        tmp['frame'] = d.strftime('%Y-%m-%d')
+        frames.append(tmp)
+    anim_df = pd.concat(frames, ignore_index=True)
+
+    fig = px.line(
+        anim_df,
+        x='date',
         y='sales',
         color='item_id',
-        animation_frame='date_str',
+        animation_frame='frame',
         animation_group='item_id',
-        range_y=[0, daily['sales'].max() * 1.2],
-        labels={'item_id': 'Item ID', 'sales': 'Sales', 'date_str': 'Date'},
-        title=f'Top {top_n} item sales animation',
+        markers=True,
+        labels={'item_id': 'Item ID', 'sales': 'Sales', 'date': 'Date', 'frame': 'Date'},
+        title=f'Top {top_n} item sales (animated lines)',
         color_discrete_sequence=px.colors.qualitative.Vivid,
     )
-    fig.update_layout(
-        title_x=0.5,
-        showlegend=False,
-        bargap=0.2,
-        xaxis={'categoryorder': 'total descending'},
-        transition={'duration': 600},
-    )
-    fig.update_traces(texttemplate='%{y:.0f}', textposition='outside')
-    # Make the animation play slower by increasing frame and transition durations
+    fig.update_layout(title_x=0.5, showlegend=True, transition={'duration': 800})
+    # Slow down animation frames
     try:
-        fig.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 1200
-        fig.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 600
+        fig.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 1000
+        fig.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 500
     except Exception:
-        # If layout controls aren't present, set transition as a fallback
-        fig.update_layout(transition={'duration': 600})
+        fig.update_layout(transition={'duration': 500})
+    fig.update_traces(mode='lines+markers', marker=dict(size=6))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -265,31 +267,35 @@ def plot_animated_sales_bubble(df: pd.DataFrame, top_n: int = 6):
     )
     if daily.empty:
         return
-    daily['date_str'] = daily['date'].dt.strftime('%Y-%m-%d')
-    fig = px.scatter(
-        daily,
-        x='item_id',
+
+    # Build cumulative frames for line growth animation
+    dates = sorted(daily['date'].unique())
+    frames = []
+    for d in dates:
+        tmp = daily[daily['date'] <= d].copy()
+        tmp['frame'] = d.strftime('%Y-%m-%d')
+        frames.append(tmp)
+    anim_df = pd.concat(frames, ignore_index=True)
+
+    fig = px.line(
+        anim_df,
+        x='date',
         y='sales',
-        size='sales',
         color='item_id',
-        animation_frame='date_str',
+        animation_frame='frame',
         animation_group='item_id',
-        range_y=[0, daily['sales'].max() * 1.2],
-        size_max=45,
-        labels={'item_id': 'Item ID', 'sales': 'Sales', 'date_str': 'Date'},
-        title=f'Sales momentum for top {top_n} items',
+        markers=True,
+        labels={'item_id': 'Item ID', 'sales': 'Sales', 'date': 'Date', 'frame': 'Date'},
+        title=f'Sales momentum (animated lines) for top {top_n} items',
         color_discrete_sequence=px.colors.qualitative.Prism,
     )
-    fig.update_layout(title_x=0.5, showlegend=False, transition={'duration': 300})
-    # Slow down animation frames for better readability
+    fig.update_layout(title_x=0.5, showlegend=True, transition={'duration': 1000})
     try:
-        fig.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 1400
-        fig.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 700
+        fig.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 1100
+        fig.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 500
     except Exception:
-        fig.update_layout(transition={'duration': 700})
-
-    # Reduce marker clutter: use consistent sizing and circular markers
-    fig.update_traces(marker=dict(sizemode='area', sizeref=2, line=dict(width=0.5, color='DarkSlateGrey')))
+        fig.update_layout(transition={'duration': 500})
+    fig.update_traces(mode='lines+markers', marker=dict(size=6, line=dict(width=0.5, color='DarkSlateGrey')))
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -597,10 +603,29 @@ if st.session_state.get("current_df") is None or st.session_state.get("apply_map
 if st.session_state.get("current_df") is not None:
     df = st.session_state["current_df"]
     st.success("Dataset loaded successfully.")
-    st.write("### Dataset sample")
-    st.dataframe(df.head(10))
 
     validate_sales_dataset(df)
+
+    # Quick overview for shopkeepers: surface high-value info first
+    insights_all = compute_shopkeeper_insights(df)
+    restock_all = suggest_restocking(df)
+    st.write("## Quick Shopkeeper Overview")
+    create_summary_metrics(insights_all)
+
+    two_col_1, two_col_2 = st.columns([2, 2])
+    with two_col_1:
+        st.write("#### Top-selling products")
+        plot_interactive_top_sellers(df)
+    with two_col_2:
+        st.write("#### Slow-moving products")
+        plot_interactive_slow_movers(df)
+
+    with st.expander("Restock suggestions (quick view)", expanded=True):
+        show_restock_table(restock_all)
+
+    # Dataset details and filters (kept below the quick overview)
+    st.write("### Dataset sample")
+    st.dataframe(df.head(10))
 
     st.write(
         "### Dataset summary",
@@ -648,7 +673,7 @@ if st.session_state.get("current_df") is not None:
         f"{insights['top_sales']} total sales",
     )
 
-    with st.expander("View restock priority list", expanded=True):
+    with st.expander("View restock priority list", expanded=False):
         st.dataframe(
             restock_df[['store_id', 'item_id', 'mean', 'std', 'demand_signal']]
             .head(10)
@@ -694,94 +719,96 @@ if st.session_state.get("current_df") is not None:
         st.write("#### Slow-moving products")
         plot_interactive_slow_movers(filtered_df)
 
-    run = st.button("Run forecasting", key="run_forecasting")
-    results = get_cached_results(input_key)
-    if run:
-        with st.spinner("Training models and generating forecasts..."):
-            filtered_df = train_baseline(filtered_df)
-            df_features, feature_cols = prepare_features(filtered_df)
-            X_train, X_valid, y_train, y_valid = split_data(df_features, feature_cols)
+    # Move forecasting and heavy visualizations into an "Advanced" expander
+    with st.expander("Advanced Forecasting & Models", expanded=False):
+        run = st.button("Run forecasting", key="run_forecasting")
+        results = get_cached_results(input_key)
+        if run:
+            with st.spinner("Training models and generating forecasts..."):
+                filtered_df = train_baseline(filtered_df)
+                df_features, feature_cols = prepare_features(filtered_df)
+                X_train, X_valid, y_train, y_valid = split_data(df_features, feature_cols)
 
-            if X_train.empty or len(y_train) < 2:
-                st.warning(
-                    "Not enough structured time-series data to train a model. "
-                    "Try a larger dataset or expand the selected date range."
-                )
-                forecast_df = pd.DataFrame(
-                    {
-                        "date": [],
-                        "store_id": [],
-                        "item_id": [],
-                        "sales_forecast": [],
-                    }
-                )
-                restock_df = suggest_restocking(filtered_df)
-                metrics_rf = metrics_lgb = {"rmse": None, "mae": None, "smape": None}
-                chosen_model = None
-            else:
-                rf_model = train_random_forest(X_train, y_train)
-                lgb_model = train_lightgbm(X_train, y_train, X_valid, y_valid)
+                if X_train.empty or len(y_train) < 2:
+                    st.warning(
+                        "Not enough structured time-series data to train a model. "
+                        "Try a larger dataset or expand the selected date range."
+                    )
+                    forecast_df = pd.DataFrame(
+                        {
+                            "date": [],
+                            "store_id": [],
+                            "item_id": [],
+                            "sales_forecast": [],
+                        }
+                    )
+                    restock_df = suggest_restocking(filtered_df)
+                    metrics_rf = metrics_lgb = {"rmse": None, "mae": None, "smape": None}
+                    chosen_model = None
+                else:
+                    rf_model = train_random_forest(X_train, y_train)
+                    lgb_model = train_lightgbm(X_train, y_train, X_valid, y_valid)
 
-                y_pred_rf = rf_model.predict(X_valid) if not X_valid.empty else np.array([])
-                y_pred_lgb = lgb_model.predict(X_valid) if not X_valid.empty else np.array([])
-                metrics_rf = evaluate_forecasts(y_valid.values, y_pred_rf) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
-                metrics_lgb = evaluate_forecasts(y_valid.values, y_pred_lgb) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
-                chosen_model = lgb_model if metrics_lgb["rmse"] is not None and metrics_rf["rmse"] is not None and metrics_lgb["rmse"] <= metrics_rf["rmse"] else rf_model
-                forecast_df = forecast_next_days(df_features, chosen_model, feature_cols, forecast_days=forecast_days)
-                restock_df = suggest_restocking(filtered_df)
+                    y_pred_rf = rf_model.predict(X_valid) if not X_valid.empty else np.array([])
+                    y_pred_lgb = lgb_model.predict(X_valid) if not X_valid.empty else np.array([])
+                    metrics_rf = evaluate_forecasts(y_valid.values, y_pred_rf) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
+                    metrics_lgb = evaluate_forecasts(y_valid.values, y_pred_lgb) if not X_valid.empty else {"rmse": None, "mae": None, "smape": None}
+                    chosen_model = lgb_model if metrics_lgb["rmse"] is not None and metrics_rf["rmse"] is not None and metrics_lgb["rmse"] <= metrics_rf["rmse"] else rf_model
+                    forecast_df = forecast_next_days(df_features, chosen_model, feature_cols, forecast_days=forecast_days)
+                    restock_df = suggest_restocking(filtered_df)
 
-        results = {
-            "df_features": df_features,
-            "feature_cols": feature_cols,
-            "metrics_rf": metrics_rf,
-            "metrics_lgb": metrics_lgb,
-            "forecast_df": forecast_df,
-            "restock_df": restock_df,
-            "chosen_model": chosen_model,
-            "filtered_df": filtered_df,
-        }
-        cache_results(input_key, results)
-    elif results is not None:
-        df_features = results["df_features"]
-        feature_cols = results["feature_cols"]
-        metrics_rf = results["metrics_rf"]
-        metrics_lgb = results["metrics_lgb"]
-        forecast_df = results["forecast_df"]
-        restock_df = results["restock_df"]
-        chosen_model = results["chosen_model"]
-        filtered_df = results["filtered_df"]
-    else:
-        st.info("Click Run forecasting to train the model and generate predictions.")
-        results = None
-
-    if results is not None:
-        st.write("## Model comparison")
-        comparison = pd.DataFrame([metrics_rf, metrics_lgb], index=["Random Forest", "LightGBM"])
-        st.dataframe(comparison)
-
-        st.write("## Forecast sample")
-        st.dataframe(forecast_df.head(20))
-        st.download_button(
-            label="Download forecast sample as CSV",
-            data=forecast_df.to_csv(index=False).encode("utf-8"),
-            file_name="sales_forecast.csv",
-            mime="text/csv",
-        )
-
-        st.write("## Restocking suggestions")
-        st.dataframe(restock_df.head(20))
-
-        st.write("## Explore store-item predictions")
-        stores = sorted(filtered_df["store_id"].unique())
-        items = sorted(filtered_df["item_id"].unique())
-        if stores and items and chosen_model is not None:
-            selected_store = st.selectbox("Choose store", stores, key="explore_store")
-            selected_item = st.selectbox("Choose item", items, key="explore_item")
-            plot_actual_vs_predicted(df_features, chosen_model, feature_cols, selected_store, selected_item)
-        elif stores and items:
-            st.info("Model training was skipped because the dataset is too small, so predictions are not available.")
+            results = {
+                "df_features": df_features,
+                "feature_cols": feature_cols,
+                "metrics_rf": metrics_rf,
+                "metrics_lgb": metrics_lgb,
+                "forecast_df": forecast_df,
+                "restock_df": restock_df,
+                "chosen_model": chosen_model,
+                "filtered_df": filtered_df,
+            }
+            cache_results(input_key, results)
+        elif results is not None:
+            df_features = results["df_features"]
+            feature_cols = results["feature_cols"]
+            metrics_rf = results["metrics_rf"]
+            metrics_lgb = results["metrics_lgb"]
+            forecast_df = results["forecast_df"]
+            restock_df = results["restock_df"]
+            chosen_model = results["chosen_model"]
+            filtered_df = results["filtered_df"]
         else:
-            st.warning("Dataset needs at least one store and one item to plot predictions.")
+            st.info("Click Run forecasting to train the model and generate predictions.")
+            results = None
+
+        if results is not None:
+            st.write("## Model comparison")
+            comparison = pd.DataFrame([metrics_rf, metrics_lgb], index=["Random Forest", "LightGBM"])
+            st.dataframe(comparison)
+
+            st.write("## Forecast sample")
+            st.dataframe(forecast_df.head(20))
+            st.download_button(
+                label="Download forecast sample as CSV",
+                data=forecast_df.to_csv(index=False).encode("utf-8"),
+                file_name="sales_forecast.csv",
+                mime="text/csv",
+            )
+
+            st.write("## Restocking suggestions")
+            st.dataframe(restock_df.head(20))
+
+            st.write("## Explore store-item predictions")
+            stores = sorted(filtered_df["store_id"].unique())
+            items = sorted(filtered_df["item_id"].unique())
+            if stores and items and chosen_model is not None:
+                selected_store = st.selectbox("Choose store", stores, key="explore_store")
+                selected_item = st.selectbox("Choose item", items, key="explore_item")
+                plot_actual_vs_predicted(df_features, chosen_model, feature_cols, selected_store, selected_item)
+            elif stores and items:
+                st.info("Model training was skipped because the dataset is too small, so predictions are not available.")
+            else:
+                st.warning("Dataset needs at least one store and one item to plot predictions.")
 
     st.write("### Notes")
     st.info(
