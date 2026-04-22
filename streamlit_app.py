@@ -127,21 +127,21 @@ def create_summary_metrics(insights: dict) -> None:
     col3.metric("Slow Mover", f"Item {insights['lowest_item']}", f"Avg {insights['lowest_recent_avg']:.1f}")
 
 
-def plot_interactive_top_sellers(df: pd.DataFrame) -> None:
+def plot_interactive_top_sellers(df: pd.DataFrame, key: str = "top_sellers_bar") -> None:
     s = df.groupby('item_id')['sales'].sum().reset_index()
     fig = px.bar(s.sort_values('sales', ascending=False), x='item_id', y='sales',
                  title='Top-selling products', labels={'item_id': 'Item ID', 'sales': 'Total Sales'},
                  hover_data={'sales': ':,', 'item_id': True})
     fig.update_layout(margin=dict(t=40, b=20))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 
-def plot_interactive_slow_movers(df: pd.DataFrame) -> None:
+def plot_interactive_slow_movers(df: pd.DataFrame, key: str = "slow_movers_bar") -> None:
     s = df.groupby('item_id')['sales'].mean().reset_index()
     fig = px.bar(s.sort_values('sales'), x='item_id', y='sales',
                  title='Slow-moving products (avg daily sales)', labels={'item_id': 'Item ID', 'sales': 'Avg Sales'})
     fig.update_layout(margin=dict(t=40, b=20))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 
 def show_restock_table(restock_df: pd.DataFrame) -> None:
@@ -203,7 +203,7 @@ def show_top_item_cards(df: pd.DataFrame, top_n: int = 4):
         )
         with col:
             st.markdown(f"**Item {item}**")
-            st.plotly_chart(sparkline_figure(item, df), use_container_width=True)
+            st.plotly_chart(sparkline_figure(item, df), use_container_width=True, key=f"sparkline_{item}")
             st.caption(f"Total sales: {total} — Avg last 30d: {recent:.1f}")
 
 
@@ -223,36 +223,27 @@ def plot_animated_top_sellers(df: pd.DataFrame, top_n: int = 5):
     if daily.empty:
         return
 
-    # Build cumulative frames so lines grow over time for better readability
-    dates = sorted(daily['date'].unique())
-    frames = []
-    for d in dates:
-        tmp = daily[daily['date'] <= d].copy()
-        tmp['frame'] = d.strftime('%Y-%m-%d')
-        frames.append(tmp)
-    anim_df = pd.concat(frames, ignore_index=True)
-
+    # Create a clean, multi-line chart showing sales trends for top items
     fig = px.line(
-        anim_df,
+        daily,
         x='date',
         y='sales',
         color='item_id',
-        animation_frame='frame',
-        animation_group='item_id',
         markers=True,
-        labels={'item_id': 'Item ID', 'sales': 'Sales', 'date': 'Date', 'frame': 'Date'},
-        title=f'Top {top_n} item sales (animated lines)',
+        labels={'item_id': 'Item ID', 'sales': 'Sales (units)', 'date': 'Date'},
+        title=f'Top {top_n} items - sales trend (last 90 days)',
         color_discrete_sequence=px.colors.qualitative.Vivid,
     )
-    fig.update_layout(title_x=0.5, showlegend=True, transition={'duration': 800})
-    # Slow down animation frames
-    try:
-        fig.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 1000
-        fig.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 500
-    except Exception:
-        fig.update_layout(transition={'duration': 500})
-    fig.update_traces(mode='lines+markers', marker=dict(size=6))
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        title_x=0.5, 
+        showlegend=True,
+        hovermode='x unified',
+        xaxis_title='Date',
+        yaxis_title='Daily Sales',
+        height=400
+    )
+    fig.update_traces(mode='lines+markers', marker=dict(size=5), line=dict(width=2))
+    st.plotly_chart(fig, use_container_width=True, key="animated_top_sellers_line")
 
 
 def plot_animated_sales_bubble(df: pd.DataFrame, top_n: int = 6):
@@ -268,35 +259,30 @@ def plot_animated_sales_bubble(df: pd.DataFrame, top_n: int = 6):
     if daily.empty:
         return
 
-    # Build cumulative frames for line growth animation
-    dates = sorted(daily['date'].unique())
-    frames = []
-    for d in dates:
-        tmp = daily[daily['date'] <= d].copy()
-        tmp['frame'] = d.strftime('%Y-%m-%d')
-        frames.append(tmp)
-    anim_df = pd.concat(frames, ignore_index=True)
-
+    # Create a clean cumulative sales chart for top items
+    daily_sorted = daily.sort_values('date')
+    daily_sorted['cumulative_sales'] = daily_sorted.groupby('item_id')['sales'].cumsum()
+    
     fig = px.line(
-        anim_df,
+        daily_sorted,
         x='date',
-        y='sales',
+        y='cumulative_sales',
         color='item_id',
-        animation_frame='frame',
-        animation_group='item_id',
         markers=True,
-        labels={'item_id': 'Item ID', 'sales': 'Sales', 'date': 'Date', 'frame': 'Date'},
-        title=f'Sales momentum (animated lines) for top {top_n} items',
+        labels={'item_id': 'Item ID', 'cumulative_sales': 'Cumulative Sales', 'date': 'Date'},
+        title=f'Sales momentum - cumulative for top {top_n} items',
         color_discrete_sequence=px.colors.qualitative.Prism,
     )
-    fig.update_layout(title_x=0.5, showlegend=True, transition={'duration': 1000})
-    try:
-        fig.layout.updatemenus[0].buttons[0].args[1]['frame']['duration'] = 1100
-        fig.layout.updatemenus[0].buttons[0].args[1]['transition']['duration'] = 500
-    except Exception:
-        fig.update_layout(transition={'duration': 500})
-    fig.update_traces(mode='lines+markers', marker=dict(size=6, line=dict(width=0.5, color='DarkSlateGrey')))
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        title_x=0.5, 
+        showlegend=True,
+        hovermode='x unified',
+        xaxis_title='Date',
+        yaxis_title='Cumulative Sales',
+        height=400
+    )
+    fig.update_traces(mode='lines+markers', marker=dict(size=5, line=dict(width=0.5, color='DarkSlateGrey')), line=dict(width=2))
+    st.plotly_chart(fig, use_container_width=True, key="sales_momentum_cumulative")
 
 
 st.title("Store Demand Forecasting Dashboard")
@@ -615,10 +601,10 @@ if st.session_state.get("current_df") is not None:
     two_col_1, two_col_2 = st.columns([2, 2])
     with two_col_1:
         st.write("#### Top-selling products")
-        plot_interactive_top_sellers(df)
+        plot_interactive_top_sellers(df, key="top_sellers_bar_overview")
     with two_col_2:
         st.write("#### Slow-moving products")
-        plot_interactive_slow_movers(df)
+        plot_interactive_slow_movers(df, key="slow_movers_bar_overview")
 
     with st.expander("Restock suggestions (quick view)", expanded=True):
         show_restock_table(restock_all)
@@ -714,10 +700,10 @@ if st.session_state.get("current_df") is not None:
         plot_animated_sales_bubble(filtered_df, top_n=5)
 
         st.write("#### Top-selling products")
-        plot_interactive_top_sellers(filtered_df)
+        plot_interactive_top_sellers(filtered_df, key="top_sellers_bar_filtered")
 
         st.write("#### Slow-moving products")
-        plot_interactive_slow_movers(filtered_df)
+        plot_interactive_slow_movers(filtered_df, key="slow_movers_bar_filtered")
 
     # Move forecasting and heavy visualizations into an "Advanced" expander
     with st.expander("Advanced Forecasting & Models", expanded=False):
