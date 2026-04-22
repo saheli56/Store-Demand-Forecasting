@@ -285,16 +285,80 @@ def plot_predictions(
     plt.show()
 
 
-def suggest_restocking(df: pd.DataFrame, threshold: float = 1.2) -> pd.DataFrame:
+def suggest_restocking(
+    df: pd.DataFrame,
+    threshold: float = 1.2,
+    safety_days: int = 7,
+    lead_time_days: int = 7,
+    min_order_qty: int = 10,
+    urgency_percentile: float = 0.8,
+) -> pd.DataFrame:
     """Identify item-store pairs that may need restocking based on recent demand."""
+    if df.empty or not all(c in df.columns for c in ["date", "store_id", "item_id", "sales"]):
+        return pd.DataFrame(
+            columns=[
+                "store_id",
+                "item_id",
+                "mean",
+                "std",
+                "sum",
+                "count",
+                "demand_signal",
+                "daily_mean",
+                "daily_std",
+                "lead_time_qty",
+                "safety_qty",
+                "suggested_qty",
+                "reorder_status",
+                "recent_14d_sum",
+                "trend_ratio",
+            ]
+        )
+
     recent = df[df["date"] >= df["date"].max() - pd.Timedelta(days=30)]
+    if recent.empty:
+        recent = df.copy()
+
+    window_days = max(1, (recent["date"].max() - recent["date"].min()).days + 1)
+    if window_days < 30:
+        window_days = 30
+
     summary = (
         recent.groupby(["store_id", "item_id"])["sales"]
         .agg(["mean", "std", "sum", "count"])
         .reset_index()
     )
-    summary["demand_signal"] = summary["mean"] + threshold * summary["std"]
-    return summary.sort_values("demand_signal", ascending=False)
+    summary["daily_mean"] = summary["sum"] / window_days
+    summary["daily_std"] = summary["std"].fillna(0)
+    summary["demand_signal"] = summary["daily_mean"] + threshold * summary["daily_std"]
+    summary["lead_time_qty"] = summary["daily_mean"] * lead_time_days
+    summary["safety_qty"] = summary["daily_mean"] * safety_days + summary["daily_std"] * 2
+    summary["suggested_qty"] = np.ceil(
+        (summary["lead_time_qty"] + summary["safety_qty"]) / max(1, min_order_qty)
+    ) * max(1, min_order_qty)
+    summary["suggested_qty"] = summary["suggested_qty"].fillna(0).astype(int)
+
+    recent_14 = df[df["date"] >= df["date"].max() - pd.Timedelta(days=14)]
+    recent_14_sum = (
+        recent_14.groupby(["store_id", "item_id"])["sales"]
+        .sum()
+        .reset_index(name="recent_14d_sum")
+    )
+    summary = summary.merge(recent_14_sum, on=["store_id", "item_id"], how="left").fillna({"recent_14d_sum": 0})
+    summary["trend_ratio"] = np.where(
+        summary["daily_mean"] > 0,
+        (summary["recent_14d_sum"] / 14) / (summary["daily_mean"] + 1e-9),
+        0,
+    )
+
+    urgency_threshold = summary["demand_signal"].quantile(urgency_percentile)
+    summary["reorder_status"] = np.where(
+        (summary["demand_signal"] >= urgency_threshold) | (summary["trend_ratio"] > 1.2),
+        "Urgent",
+        "Normal",
+    )
+    summary = summary.sort_values(["reorder_status", "demand_signal"], ascending=[False, False])
+    return summary
 
 
 def forecast_next_days(

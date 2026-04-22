@@ -182,12 +182,42 @@ def plot_interactive_slow_movers(df: pd.DataFrame, key: str = "slow_movers_bar")
 def show_restock_table(restock_df: pd.DataFrame) -> None:
     disp = restock_df.copy()
     disp['demand_signal'] = disp['demand_signal'].round(2)
-    disp = disp[['store_id', 'item_id', 'mean', 'std', 'sum', 'count', 'demand_signal']]
+    disp['daily_mean'] = disp['daily_mean'].round(2)
+    disp['daily_std'] = disp['daily_std'].round(2)
+    disp['lead_time_qty'] = disp['lead_time_qty'].round(1)
+    disp['safety_qty'] = disp['safety_qty'].round(1)
+    disp['suggested_qty'] = disp['suggested_qty'].astype(int)
+    disp = disp[
+        [
+            'store_id',
+            'item_id',
+            'daily_mean',
+            'daily_std',
+            'sum',
+            'count',
+            'lead_time_qty',
+            'safety_qty',
+            'suggested_qty',
+            'reorder_status',
+            'demand_signal',
+        ]
+    ]
     st.write("### Restock suggestions (higher demand_signal = higher priority)")
 
-    # Styled HTML table with color bands based on demand_signal
+    # Styled HTML table with color bands based on demand_signal and urgency
     styler = disp.style.background_gradient(subset=['demand_signal'], cmap='YlOrRd')
-    styler = styler.format({'mean': '{:.1f}', 'std': '{:.1f}', 'sum': '{:.0f}', 'count': '{:.0f}', 'demand_signal': '{:.2f}'})
+    styler = styler.format(
+        {
+            'daily_mean': '{:.1f}',
+            'daily_std': '{:.1f}',
+            'sum': '{:.0f}',
+            'count': '{:.0f}',
+            'lead_time_qty': '{:.1f}',
+            'safety_qty': '{:.1f}',
+            'suggested_qty': '{:.0f}',
+            'demand_signal': '{:.2f}',
+        }
+    )
     st.markdown(styler.to_html(), unsafe_allow_html=True)
 
     # Allow the shopkeeper to select items to include in a reorder list
@@ -407,6 +437,20 @@ with st.sidebar:
         st.session_state["user_mapping"] = {}
 
     forecast_days = st.slider("Forecast horizon", min_value=7, max_value=90, value=30, step=7, key="forecast_days")
+    st.write("---")
+    st.header("Restock settings")
+    safety_days = st.number_input("Safety stock days", min_value=0, max_value=30, value=7, step=1, key="safety_days")
+    lead_time_days = st.number_input("Lead time days", min_value=1, max_value=30, value=7, step=1, key="lead_time_days")
+    min_order_qty = st.number_input("Minimum order quantity", min_value=1, max_value=500, value=10, step=1, key="min_order_qty")
+    urgency_percentile = st.slider(
+        "Urgent reorder percentile",
+        min_value=50,
+        max_value=100,
+        value=80,
+        step=5,
+        key="urgency_percentile",
+        help="Top percentile of demand suggestions marked as urgent.",
+    )
 
 
 def load_sales_dataframe(uploaded_file, local_path, user_mapping: dict = None):
@@ -629,7 +673,13 @@ if st.session_state.get("current_df") is not None:
 
     # Quick overview for shopkeepers: surface high-value info first
     insights_all = compute_shopkeeper_insights(df)
-    restock_all = suggest_restocking(df)
+    restock_all = suggest_restocking(
+        df,
+        safety_days=safety_days,
+        lead_time_days=lead_time_days,
+        min_order_qty=min_order_qty,
+        urgency_percentile=urgency_percentile / 100.0,
+    )
     st.write("## Quick Shopkeeper Overview")
     create_summary_metrics(insights_all)
 
@@ -640,6 +690,9 @@ if st.session_state.get("current_df") is not None:
     with two_col_2:
         st.write("#### Slow-moving products")
         plot_interactive_slow_movers(df, key="slow_movers_bar_overview")
+
+    urgent_count = int((restock_all['reorder_status'] == 'Urgent').sum()) if not restock_all.empty else 0
+    st.metric("Urgent reorder items", f"{urgent_count}", "Reorder now")
 
     with st.expander("Restock suggestions (quick view)", expanded=True):
         show_restock_table(restock_all)
@@ -677,7 +730,13 @@ if st.session_state.get("current_df") is not None:
         filtered_df = filtered_df[filtered_df['store_id'] == selected_store]
 
     insights = compute_shopkeeper_insights(filtered_df)
-    restock_df = suggest_restocking(filtered_df)
+    restock_df = suggest_restocking(
+        filtered_df,
+        safety_days=safety_days,
+        lead_time_days=lead_time_days,
+        min_order_qty=min_order_qty,
+        urgency_percentile=urgency_percentile / 100.0,
+    )
     out_of_stock_items = insights['out_of_stock']
 
     st.write("## Inventory action")
@@ -696,11 +755,19 @@ if st.session_state.get("current_df") is not None:
 
     with st.expander("View restock priority list", expanded=False):
         st.dataframe(
-            restock_df[['store_id', 'item_id', 'mean', 'std', 'demand_signal']]
+            restock_df[
+                ['store_id', 'item_id', 'daily_mean', 'daily_std', 'sum', 'count', 'lead_time_qty', 'safety_qty', 'suggested_qty', 'reorder_status', 'demand_signal']
+            ]
             .head(10)
             .rename(columns={
-                'mean': 'Avg sales',
-                'std': 'Sales std',
+                'daily_mean': 'Avg daily sales',
+                'daily_std': 'Sales std',
+                'sum': '30d demand',
+                'count': 'Active days',
+                'lead_time_qty': 'Lead time qty',
+                'safety_qty': 'Safety qty',
+                'suggested_qty': 'Reorder qty',
+                'reorder_status': 'Urgency',
                 'demand_signal': 'Priority score',
             }),
             use_container_width=True,
