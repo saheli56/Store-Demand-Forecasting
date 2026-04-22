@@ -129,18 +129,53 @@ def create_summary_metrics(insights: dict) -> None:
 
 def plot_interactive_top_sellers(df: pd.DataFrame, key: str = "top_sellers_bar") -> None:
     s = df.groupby('item_id')['sales'].sum().reset_index()
-    fig = px.bar(s.sort_values('sales', ascending=False), x='item_id', y='sales',
-                 title='Top-selling products', labels={'item_id': 'Item ID', 'sales': 'Total Sales'},
-                 hover_data={'sales': ':,', 'item_id': True})
-    fig.update_layout(margin=dict(t=40, b=20))
+    s = s.sort_values('sales', ascending=True)
+    fig = px.bar(
+        s,
+        x='sales',
+        y='item_id',
+        orientation='h',
+        color='sales',
+        color_continuous_scale='teal',
+        labels={'item_id': 'Item ID', 'sales': 'Total Sales'},
+        title='Top-selling products',
+        hover_data={'sales': ':,', 'item_id': True},
+    )
+    fig.update_traces(marker_line_width=1, marker_line_color='rgb(50, 50, 50)', text=s['sales'], texttemplate='%{text:.0f}', textposition='outside')
+    fig.update_layout(
+        margin=dict(t=50, b=30, l=120, r=20),
+        xaxis_title='Total Sales',
+        yaxis_title='Item ID',
+        coloraxis_showscale=False,
+        uniformtext_minsize=8,
+        uniformtext_mode='hide',
+    )
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 
 def plot_interactive_slow_movers(df: pd.DataFrame, key: str = "slow_movers_bar") -> None:
     s = df.groupby('item_id')['sales'].mean().reset_index()
-    fig = px.bar(s.sort_values('sales'), x='item_id', y='sales',
-                 title='Slow-moving products (avg daily sales)', labels={'item_id': 'Item ID', 'sales': 'Avg Sales'})
-    fig.update_layout(margin=dict(t=40, b=20))
+    s = s.sort_values('sales', ascending=True)
+    fig = px.bar(
+        s,
+        x='sales',
+        y='item_id',
+        orientation='h',
+        color='sales',
+        color_continuous_scale='OrRd',
+        labels={'item_id': 'Item ID', 'sales': 'Avg Daily Sales'},
+        title='Slow-moving products (avg daily sales)',
+        hover_data={'sales': ':.2f', 'item_id': True},
+    )
+    fig.update_traces(marker_line_width=1, marker_line_color='rgb(50, 50, 50)', text=s['sales'], texttemplate='%{text:.1f}', textposition='outside')
+    fig.update_layout(
+        margin=dict(t=50, b=30, l=120, r=20),
+        xaxis_title='Avg Daily Sales',
+        yaxis_title='Item ID',
+        coloraxis_showscale=False,
+        uniformtext_minsize=8,
+        uniformtext_mode='hide',
+    )
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 
@@ -698,12 +733,6 @@ if st.session_state.get("current_df") is not None:
 
         st.write("#### Sales momentum bubble")
         plot_animated_sales_bubble(filtered_df, top_n=5)
-
-        st.write("#### Top-selling products")
-        plot_interactive_top_sellers(filtered_df, key="top_sellers_bar_filtered")
-
-        st.write("#### Slow-moving products")
-        plot_interactive_slow_movers(filtered_df, key="slow_movers_bar_filtered")
 
     # Move forecasting and heavy visualizations into an "Advanced" expander
     with st.expander("Advanced Forecasting & Models", expanded=False):
