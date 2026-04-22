@@ -725,9 +725,6 @@ if st.session_state.get("current_df") is not None:
     k3.metric("Top Store", f"Store {top_store}" if top_store is not None else "N/A")
 
     with st.expander("More product analytics", expanded=False):
-        st.write("#### Top items — quick view")
-        show_top_item_cards(filtered_df, top_n=4)
-
         st.write("#### Animated top item sales")
         plot_animated_top_sellers(filtered_df, top_n=5)
 
