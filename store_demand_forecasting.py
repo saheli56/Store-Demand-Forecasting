@@ -88,13 +88,37 @@ def load_sales_data(csv_path: str) -> pd.DataFrame:
         raise ValueError(f"Missing required columns after normalization: {missing}")
 
     # Parse and clean types
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
     df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
     df["item_id"] = df["item_id"].astype(str).str.strip()
     df["store_id"] = df["store_id"].astype(str).str.strip()
     df["store_id"] = pd.factorize(df["store_id"])[0] + 1
     df = df.dropna(subset=["date", "item_id", "sales"])  # remove unusable rows
-
+    
+    # Handle sparsity: aggregate multiple sales per day, then resample daily to fill missing dates with 0.
+    # A missing transaction in retail data generally implies zero demand/sales for that day.
+    df = (
+        df.groupby(["store_id", "item_id", "date"])["sales"]
+        .sum()
+        .reset_index()
+    )
+    
+    # Reindex each store-item combination to have a complete daily date range
+    max_date = df["date"].max()
+    def fill_group(grp):
+        if grp.empty:
+            return grp
+        idx = pd.date_range(start=grp["date"].min(), end=max_date, freq="D")
+        grp = grp.set_index("date").reindex(idx)
+        grp["sales"] = grp["sales"].fillna(0)
+        return grp.rename_axis("date")
+        
+    df = (
+        df.groupby(["store_id", "item_id"])
+        .apply(fill_group, include_groups=False)
+        .reset_index()
+    )
+    
     return df.sort_values(["store_id", "item_id", "date"]).reset_index(drop=True)
 
 
@@ -241,6 +265,81 @@ def train_lightgbm(
     return model
 
 
+def train_lightgbm_tweedie(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_valid: pd.DataFrame,
+    y_valid: pd.Series,
+    tweedie_variance_power: float = 1.5,
+) -> lgb.LGBMRegressor:
+    """Train a LightGBM model with Tweedie objective for zero-inflated demand."""
+    model = lgb.LGBMRegressor(
+        objective="tweedie",
+        tweedie_variance_power=tweedie_variance_power,
+        metric="rmse",
+        learning_rate=0.1,
+        num_leaves=31,
+        feature_fraction=0.8,
+        bagging_fraction=0.8,
+        bagging_freq=5,
+        n_estimators=200,
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X_train, y_train)
+    return model
+
+
+class HurdleModel:
+    """Two-stage model: predicts if demand > 0, then predicts quantity if > 0."""
+    def __init__(self):
+        self.classifier = lgb.LGBMClassifier(
+            objective="binary",
+            learning_rate=0.1,
+            num_leaves=31,
+            n_estimators=100,
+            random_state=42,
+            n_jobs=-1,
+        )
+        self.regressor = lgb.LGBMRegressor(
+            objective="regression",
+            metric="rmse",
+            learning_rate=0.1,
+            num_leaves=31,
+            n_estimators=100,
+            random_state=42,
+            n_jobs=-1,
+        )
+
+    def fit(self, X: pd.DataFrame, y: pd.Series):
+        # Stage 1: Classifier (Demand > 0)
+        y_class = (y > 0).astype(int)
+        self.classifier.fit(X, y_class)
+        
+        # Stage 2: Regressor (Only on positive demand)
+        pos_mask = y > 0
+        X_pos = X[pos_mask]
+        y_pos = y[pos_mask]
+        if len(y_pos) > 0:
+            self.regressor.fit(X_pos, y_pos)
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        # P(demand > 0)
+        prob_positive = self.classifier.predict_proba(X)[:, 1]
+        
+        # E[demand | demand > 0]
+        # We ensure regression predictions aren't negative
+        pred_quantity = np.maximum(0, self.regressor.predict(X))
+        
+        # Final expected value = P(>0) * E[>0]
+        return prob_positive * pred_quantity
+
+def train_hurdle_model(X_train: pd.DataFrame, y_train: pd.Series) -> HurdleModel:
+    model = HurdleModel()
+    model.fit(X_train, y_train)
+    return model
+
+
 def smape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Compute Symmetric Mean Absolute Percentage Error."""
     denom = (np.abs(y_true) + np.abs(y_pred)) / 2
@@ -249,12 +348,18 @@ def smape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return np.mean(diff[valid] / denom[valid]) * 100 if np.any(valid) else 0.0
 
 
+def wape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Compute Weighted Absolute Percentage Error."""
+    denom = np.sum(np.abs(y_true))
+    return np.sum(np.abs(y_true - y_pred)) / denom if denom != 0 else 0.0
+
 def evaluate_forecasts(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """Return RMSE, MAE, and SMAPE scores."""
+    """Return RMSE, MAE, SMAPE, and WAPE scores."""
     return {
         "rmse": np.sqrt(mean_squared_error(y_true, y_pred)),
         "mae": mean_absolute_error(y_true, y_pred),
         "smape": smape(y_true, y_pred),
+        "wape": wape(y_true, y_pred),
     }
 
 
